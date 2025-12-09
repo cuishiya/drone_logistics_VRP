@@ -23,9 +23,9 @@ from algorithms.trip_assigner import TripAssigner
 from algorithms.battery_manager import BatteryManager
 from simulation.order_generator import OrderGenerator
 from config import (
-    T_HORIZON, PSI, UPSILON, NUM_DRONES, NUM_BATTERIES,
+    T_HORIZON, PSI, UPSILON,
     DRONE_WEIGHT, MAX_PAYLOAD, E_MAX, E_MIN, CHARGE_RATE,
-    DRONE_SPEED_MEAN, M_MAX_TRIPS, DEPOT_LOCATION,
+    DRONE_SPEED_MEAN, M_MAX_TRIPS,
     SERVICE_TIME, LATE_PENALTY_RATE, DISTANCE_COST_RATE,
     DEFAULT_DEPOT_INFOS, NUM_DEPOTS, DRONES_PER_DEPOT, BATTERIES_PER_DEPOT
 )
@@ -34,55 +34,75 @@ from depot import DepotInfo, create_depot_infos
 
 @dataclass
 class SimulationResult:
-    """Results from a simulation run"""
-    total_orders: int = 0
-    served_orders: int = 0
-    total_distance: float = 0.0
-    total_lateness: float = 0.0
-    total_cost: float = 0.0  # Total cost c (Algorithm 1, line 5)
-    total_trips: int = 0
-    failed_trips: int = 0  # Trips that failed due to energy
-    average_lateness: float = 0.0
-    service_rate: float = 0.0
+    """
+    仿真运行结果
     
-    # Detailed logs
-    order_log: List[Dict] = field(default_factory=list)
-    trip_log: List[Dict] = field(default_factory=list)
-    decision_log: List[Dict] = field(default_factory=list)
+    包含仿真统计数据和详细日志，用于分析和可视化
+    """
+    total_orders: int = 0           # 总订单数
+    served_orders: int = 0          # 已服务订单数
+    total_distance: float = 0.0     # 总飞行距离（米）
+    total_lateness: float = 0.0     # 总延迟时间（分钟）
+    total_cost: float = 0.0         # 总成本（算法1，第5行输出）
+    total_trips: int = 0            # 总行程数
+    failed_trips: int = 0           # 因能耗不足失败的行程数
+    average_lateness: float = 0.0   # 平均延迟（分钟）
+    service_rate: float = 0.0       # 服务率
+    max_lateness: float = 0.0       # 最大延迟（分钟）
+    total_energy: float = 0.0       # 总能耗（Wh）
+    
+    # 详细日志
+    order_log: List[Dict] = field(default_factory=list)    # 订单日志
+    trip_log: List[Dict] = field(default_factory=list)     # 行程日志
+    decision_log: List[Dict] = field(default_factory=list) # 决策日志
+    
+    # 可视化数据
+    trips: List[Trip] = field(default_factory=list)        # 所有行程对象
+    orders: List[Order] = field(default_factory=list)      # 所有订单对象
+    lateness_distribution: List[float] = field(default_factory=list)  # 延迟分布
 
 
 class Simulator:
     """
-    Main simulation engine for DRPUDEC
-    支持多仓库场景：每个仓库独立运作，有自己的无人机、电池和订单
+    DRPUDEC多仓库仿真引擎
     
-    Implements:
-    - Algorithm 1: MDP main loop
-    - Algorithm 2: CFA policy
+    每个仓库独立运作，有自己的无人机、电池和订单
     
-    The simulation proceeds in discrete time steps of PSI minutes.
-    At each decision epoch:
-    1. Execute CFA policy to generate decisions
-    2. Advance time and observe new orders
-    3. Update system state
+    实现算法:
+    - Algorithm 1: MDP主循环
+    - Algorithm 2: CFA策略
+    
+    仿真以PSI分钟为间隔进行离散时间步。
+    每个决策周期:
+    1. 执行CFA策略生成决策
+    2. 推进时间并观察新订单
+    3. 更新系统状态
     """
     
     def __init__(
         self,
-        num_drones: int = NUM_DRONES,
-        num_batteries: int = NUM_BATTERIES,
         time_horizon: float = T_HORIZON,
         decision_interval: float = PSI,
         buffer_threshold: float = UPSILON,
         max_trips_per_drone: int = M_MAX_TRIPS,
         seed: Optional[int] = None,
-        multi_depot_mode: bool = True,  # 多仓库模式
-        depot_infos: List[DepotInfo] = None,  # 多仓库配置
-        drones_per_depot: int = DRONES_PER_DEPOT,  # 每个仓库的无人机数
-        batteries_per_depot: int = BATTERIES_PER_DEPOT  # 每个仓库的电池数
+        depot_infos: List[DepotInfo] = None,
+        drones_per_depot: int = DRONES_PER_DEPOT,
+        batteries_per_depot: int = BATTERIES_PER_DEPOT
     ):
-        self.num_drones = num_drones
-        self.num_batteries = num_batteries
+        """
+        初始化多仓库仿真器
+        
+        Args:
+            time_horizon: 仿真时长（分钟）
+            decision_interval: 决策周期间隔（分钟）
+            buffer_threshold: 行程取消缓冲阈值（分钟）
+            max_trips_per_drone: 每架无人机每周期最大行程数(M参数)
+            seed: 随机种子
+            depot_infos: 仓库配置列表
+            drones_per_depot: 每个仓库的无人机数量
+            batteries_per_depot: 每个仓库的电池数量
+        """
         self.time_horizon = time_horizon
         self.decision_interval = decision_interval
         self.buffer_threshold = buffer_threshold
@@ -90,24 +110,20 @@ class Simulator:
         self.seed = seed
         
         # 多仓库配置
-        self.multi_depot_mode = multi_depot_mode
         self.depot_infos = depot_infos if depot_infos is not None else DEFAULT_DEPOT_INFOS
         self.drones_per_depot = drones_per_depot
         self.batteries_per_depot = batteries_per_depot
         
-        # Initialize components
+        # 初始化系统组件
         self._initialize_system()
     
     def _initialize_system(self):
-        """
-        Initialize all system components
-        多仓库场景：为每个仓库创建独立的无人机、电池和算法组件
-        """
+        """初始化所有系统组件，为每个仓库创建独立的无人机、电池和算法组件"""
         # 多仓库列表
         self.depots: List[Depot] = []
         self.drones: List[Drone] = []
-        self.trip_builders: Dict[int, TripBuilder] = {}  # 每个仓库的TripBuilder
-        self.battery_managers: Dict[int, BatteryManager] = {}  # 每个仓库的BatteryManager
+        self.trip_builders: Dict[int, TripBuilder] = {}
+        self.battery_managers: Dict[int, BatteryManager] = {}
         
         # 全局组件
         self.energy_model = EnergyModel()
@@ -121,115 +137,65 @@ class Simulator:
         drone_id_counter = 0
         battery_id_counter = 0
         
-        if self.multi_depot_mode:
-            # 多仓库模式：为每个仓库创建资源
-            for depot_info in self.depot_infos:
-                # 创建仓库
-                depot = Depot(
-                    location=depot_info.location.copy(),
-                    available_batteries=[],
-                    charging_batteries=[],
-                    num_charging_stations=depot_info.num_charging_stations,
-                    id=depot_info.id,
-                    name=depot_info.name
-                )
-                
-                # 创建该仓库的电池
-                for _ in range(self.batteries_per_depot):
-                    battery = Battery(
-                        id=battery_id_counter,
-                        current_charge=E_MAX,
-                        max_charge=E_MAX,
-                        cycle_count=0,
-                        status=BatteryStatus.AVAILABLE
-                    )
-                    depot.available_batteries.append(battery)
-                    battery_id_counter += 1
-                
-                # 创建该仓库的无人机
-                for _ in range(self.drones_per_depot):
-                    # 为无人机分配电池
-                    battery = depot.available_batteries.pop(0) if depot.available_batteries else None
-                    if battery:
-                        battery.status = BatteryStatus.IN_USE
-                    
-                    drone = Drone(
-                        id=drone_id_counter,
-                        location=depot_info.location.copy(),
-                        status=DroneStatus.IDLE,
-                        battery=battery,
-                        weight=DRONE_WEIGHT,
-                        max_payload=MAX_PAYLOAD,
-                        available_time=0.0,
-                        home_depot_id=depot_info.id,
-                        home_depot_location=depot_info.location.copy()
-                    )
-                    self.drones.append(drone)
-                    depot.drones.append(drone)
-                    drone_id_counter += 1
-                
-                self.depots.append(depot)
-                
-                # 为该仓库创建TripBuilder
-                self.trip_builders[depot_info.id] = TripBuilder(
-                    depot, self.energy_model,
-                    depot_id=depot_info.id,
-                    depot_location=depot_info.location
-                )
-                
-                # 为该仓库创建BatteryManager
-                self.battery_managers[depot_info.id] = BatteryManager(depot)
-        else:
-            # 单仓库模式（向后兼容）
+        # 为每个仓库创建资源
+        for depot_info in self.depot_infos:
+            # 创建仓库
             depot = Depot(
-                location=DEPOT_LOCATION.copy(),
+                location=depot_info.location.copy(),
                 available_batteries=[],
                 charging_batteries=[],
-                id=0,
-                name="Main Depot"
+                num_charging_stations=depot_info.num_charging_stations,
+                id=depot_info.id,
+                name=depot_info.name
             )
             
-            # 创建电池
-            for i in range(self.num_batteries):
+            # 创建该仓库的电池
+            for _ in range(self.batteries_per_depot):
                 battery = Battery(
-                    id=i,
+                    id=battery_id_counter,
                     current_charge=E_MAX,
                     max_charge=E_MAX,
                     cycle_count=0,
                     status=BatteryStatus.AVAILABLE
                 )
                 depot.available_batteries.append(battery)
+                battery_id_counter += 1
             
-            # 创建无人机
-            for i in range(self.num_drones):
+            # 创建该仓库的无人机
+            for _ in range(self.drones_per_depot):
+                # 为无人机分配电池
                 battery = depot.available_batteries.pop(0) if depot.available_batteries else None
                 if battery:
                     battery.status = BatteryStatus.IN_USE
                 
                 drone = Drone(
-                    id=i,
-                    location=DEPOT_LOCATION.copy(),
+                    id=drone_id_counter,
+                    location=depot_info.location.copy(),
                     status=DroneStatus.IDLE,
                     battery=battery,
                     weight=DRONE_WEIGHT,
                     max_payload=MAX_PAYLOAD,
                     available_time=0.0,
-                    home_depot_id=0,
-                    home_depot_location=DEPOT_LOCATION.copy()
+                    home_depot_id=depot_info.id,
+                    home_depot_location=depot_info.location.copy()
                 )
                 self.drones.append(drone)
                 depot.drones.append(drone)
+                drone_id_counter += 1
             
             self.depots.append(depot)
-            self.trip_builders[0] = TripBuilder(depot, self.energy_model, depot_id=0)
-            self.battery_managers[0] = BatteryManager(depot)
+            
+            # 为该仓库创建TripBuilder
+            self.trip_builders[depot_info.id] = TripBuilder(
+                depot, self.energy_model,
+                depot_id=depot_info.id,
+                depot_location=depot_info.location
+            )
+            
+            # 为该仓库创建BatteryManager
+            self.battery_managers[depot_info.id] = BatteryManager(depot)
         
-        # 向后兼容：保留单一depot引用
-        self.depot = self.depots[0] if self.depots else None
-        self.trip_builder = self.trip_builders.get(0)
-        self.battery_manager = self.battery_managers.get(0)
-        
-        # State tracking
+        # 状态跟踪
         self.current_time = 0.0
         self.pending_orders: List[Order] = []
         self.served_orders: List[Order] = []
@@ -238,7 +204,7 @@ class Simulator:
         self.completed_trips: List[Trip] = []
     
     def reset(self):
-        """Reset simulation to initial state"""
+        """重置仿真到初始状态"""
         self._initialize_system()
     
     def run(
@@ -248,28 +214,31 @@ class Simulator:
         verbose: bool = False
     ) -> SimulationResult:
         """
-        Run the full simulation (Algorithm 1: MDP Main Loop)
+        运行完整仿真 (Algorithm 1: MDP主循环)
         
         Args:
-            initial_orders: Optional list of orders at time 0
-            dynamic_orders: Whether to generate dynamic orders
-            verbose: Print progress information
+            initial_orders: 初始订单列表
+            dynamic_orders: 是否动态生成订单
+            verbose: 是否输出详细信息
             
         Returns:
-            SimulationResult with statistics
+            SimulationResult 仿真结果
         """
         result = SimulationResult()
         
-        # Initialize with any initial orders
+        # 初始化订单
         if initial_orders:
             self.pending_orders.extend(initial_orders)
             result.total_orders += len(initial_orders)
         
+        total_drones = len(self.depot_infos) * self.drones_per_depot
+        total_batteries = len(self.depot_infos) * self.batteries_per_depot
+        
         if verbose:
-            print(f"Starting simulation with {len(self.pending_orders)} initial orders")
-            print(f"Time horizon: {self.time_horizon} minutes")
-            print(f"Decision interval: {self.decision_interval} minutes")
-            print(f"Drones: {self.num_drones}, Batteries: {self.num_batteries}")
+            print(f"开始仿真，初始订单: {len(self.pending_orders)}")
+            print(f"仿真时长: {self.time_horizon} 分钟")
+            print(f"决策周期: {self.decision_interval} 分钟")
+            print(f"仓库数: {len(self.depot_infos)}, 无人机: {total_drones}, 电池: {total_batteries}")
             print("-" * 50)
         
         # Main simulation loop (Algorithm 1)
@@ -316,16 +285,28 @@ class Simulator:
         result.served_orders = len(self.served_orders)
         result.total_trips = len(self.completed_trips)
         result.total_distance = sum(t.total_distance for t in self.completed_trips)
+        result.total_energy = sum(t.expected_energy for t in self.completed_trips)
+        
+        # 保存行程和订单数据用于可视化
+        result.trips = list(self.completed_trips)
+        result.orders = list(self.served_orders) + list(self.pending_orders)
         
         # Calculate lateness
         total_lateness = 0.0
+        max_lateness = 0.0
+        lateness_list = []
+        
         for order in self.served_orders:
             if hasattr(order, 'actual_delivery_time') and order.actual_delivery_time:
                 lateness = max(0, order.actual_delivery_time - order.deadline)
                 total_lateness += lateness
+                max_lateness = max(max_lateness, lateness)
+                lateness_list.append(lateness)
         
         result.total_lateness = total_lateness
         result.average_lateness = total_lateness / max(1, result.served_orders)
+        result.max_lateness = max_lateness
+        result.lateness_distribution = lateness_list
         result.service_rate = result.served_orders / max(1, result.total_orders)
         
         if verbose:
@@ -335,20 +316,22 @@ class Simulator:
             print(f"Served orders: {result.served_orders} ({result.service_rate:.1%})")
             print(f"Total trips: {result.total_trips}")
             print(f"Total distance: {result.total_distance:.1f} m")
+            print(f"Total energy: {result.total_energy:.1f} Wh")
             print(f"Average lateness: {result.average_lateness:.1f} min")
+            print(f"Max lateness: {result.max_lateness:.1f} min")
         
         return result
     
     def _execute_cfa_policy(self, verbose: bool = False) -> Tuple[Dict, float]:
         """
-        Execute CFA policy (Algorithm 2: process_decision_state)
-        多仓库场景：每个仓库独立执行CFA策略
+        执行CFA策略 (Algorithm 2: process_decision_state)
+        每个仓库独立执行CFA策略
         
-        Input: Pre-decision state s_k = (t_k, D_k, U_k, Δ_k, B_k); threshold υ
-        Output: Post-decision state s_k^x; cost c(s_k, x)
+        输入: 决策前状态 s_k = (t_k, D_k, U_k, Δ_k, B_k); 阈值 υ
+        输出: 决策后状态 s_k^x; 成本 c(s_k, x)
         
         Returns:
-            Tuple of (decision_info dict, epoch_cost)
+            (decision_info字典, epoch_cost)元组
         """
         decision_info = {
             "time": self.current_time,
@@ -357,167 +340,94 @@ class Simulator:
             "trips_selected": 0,
             "trips_assigned": 0,
             "epoch_cost": 0.0,
-            "depot_stats": {}  # 多仓库：每个仓库的统计
+            "depot_stats": {}
         }
         
         # Line 1: τ(s_k, x) ← 0, ψ(s_k, x) ← 0
-        tau_cost = 0.0  # Total distance
-        psi_cost = 0.0  # Total lateness
+        tau_cost = 0.0  # 总距离
+        psi_cost = 0.0  # 总延迟
         
-        # 多仓库模式：按仓库分组订单并处理
-        if self.multi_depot_mode:
-            # 按仓库分组订单
-            orders_by_depot = self.order_generator.get_orders_by_depot(
-                [o for o in self.pending_orders if not o.is_served and o.assigned_trip_id is None]
+        # 按仓库分组订单
+        orders_by_depot = self.order_generator.get_orders_by_depot(
+            [o for o in self.pending_orders if not o.is_served and o.assigned_trip_id is None]
+        )
+        
+        all_new_trips = []
+        all_selected_trips = []
+        
+        # 为每个仓库执行CFA策略
+        for depot in self.depots:
+            depot_id = depot.id
+            depot_orders = orders_by_depot.get(depot_id, [])
+            
+            if not depot_orders:
+                continue
+            
+            trip_builder = self.trip_builders.get(depot_id)
+            if trip_builder is None:
+                continue
+            
+            # 为该仓库构建trips
+            depot_trips = trip_builder.build_trips(
+                depot_orders,
+                self.current_time,
+                insertion_strategy="urgency"
             )
+            all_new_trips.extend(depot_trips)
             
-            all_new_trips = []
-            all_selected_trips = []
-            
-            # 为每个仓库执行CFA策略
-            for depot in self.depots:
-                depot_id = depot.id
-                depot_orders = orders_by_depot.get(depot_id, [])
-                
-                if not depot_orders:
-                    continue
-                
-                trip_builder = self.trip_builders.get(depot_id)
-                if trip_builder is None:
-                    continue
-                
-                # 为该仓库构建trips
-                depot_trips = trip_builder.build_trips(
-                    depot_orders,
-                    self.current_time,
-                    insertion_strategy="urgency"
-                )
-                all_new_trips.extend(depot_trips)
-                
-                decision_info["depot_stats"][depot_id] = {
-                    "orders": len(depot_orders),
-                    "trips_built": len(depot_trips)
-                }
-                
-                if verbose:
-                    print(f"  Depot {depot_id} ({depot.name}): {len(depot_orders)} orders, {len(depot_trips)} trips built")
-            
-            decision_info["trips_built"] = len(all_new_trips)
-            
-            # 选择和分配trips（考虑仓库约束）
-            all_candidate_trips = all_new_trips + [t for t in self.active_trips if not t.is_executed]
-            
-            if all_candidate_trips:
-                # 按仓库分组可用无人机
-                for depot in self.depots:
-                    depot_id = depot.id
-                    # 获取该仓库的trips和无人机
-                    depot_trips = [t for t in all_candidate_trips if t.depot_id == depot_id]
-                    depot_drones = [d for d in self.drones 
-                                   if d.home_depot_id == depot_id and d.is_available(self.current_time)]
-                    depot_orders = orders_by_depot.get(depot_id, [])
-                    
-                    if not depot_trips or not depot_drones:
-                        continue
-                    
-                    # 为该仓库选择trips
-                    selected, assignments = self.trip_selector.select_trips(
-                        depot_trips,
-                        depot_orders,
-                        depot_drones,
-                        self.current_time
-                    )
-                    all_selected_trips.extend(selected)
-                    
-                    # 分配trips到无人机
-                    if selected:
-                        trip_assignments = self.trip_assigner.assign_trips(
-                            selected,
-                            depot_drones,
-                            self.current_time,
-                            assignments
-                        )
-                        
-                        for drone_id, trip_schedule in trip_assignments.items():
-                            for trip, start_time in trip_schedule:
-                                self._dispatch_trip(drone_id, trip, start_time)
-                                decision_info["trips_assigned"] += 1
-                
-                decision_info["trips_selected"] = len(all_selected_trips)
-                
-                if verbose:
-                    print(f"Selected {len(all_selected_trips)} trips, assigned {decision_info['trips_assigned']}")
-        else:
-            # 单仓库模式（原始逻辑）
-            all_pending = [o for o in self.pending_orders if not o.is_served]
-            new_orders = [o for o in all_pending if o.assigned_trip_id is None]
-            
-            # Update existing scheduled trips with new orders
-            if self.active_trips and new_orders:
-                self.active_trips, remaining_orders = self.trip_builder.update_trips(
-                    self.active_trips,
-                    new_orders,
-                    self.current_time
-                )
-                new_orders = remaining_orders
+            decision_info["depot_stats"][depot_id] = {
+                "orders": len(depot_orders),
+                "trips_built": len(depot_trips)
+            }
             
             if verbose:
-                print(f"After update_trips: {len(new_orders)} orders still unassigned")
-            
-            # Build new candidate trips
-            unassigned_orders = [o for o in self.pending_orders 
-                               if not o.is_served and o.assigned_trip_id is None]
-            
-            new_trips = []
-            if unassigned_orders:
-                new_trips = self.trip_builder.build_trips(
-                    unassigned_orders,
-                    self.current_time,
-                    insertion_strategy="urgency"
-                )
-                decision_info["trips_built"] = len(new_trips)
+                print(f"  仓库 {depot_id} ({depot.name}): {len(depot_orders)} 订单, {len(depot_trips)} 行程")
+        
+        decision_info["trips_built"] = len(all_new_trips)
+        
+        # 选择和分配trips（考虑仓库约束）
+        all_candidate_trips = all_new_trips + [t for t in self.active_trips if not t.is_executed]
+        
+        if all_candidate_trips:
+            # 按仓库分组可用无人机
+            for depot in self.depots:
+                depot_id = depot.id
+                # 获取该仓库的trips和无人机
+                depot_trips = [t for t in all_candidate_trips if t.depot_id == depot_id]
+                depot_drones = [d for d in self.drones 
+                               if d.home_depot_id == depot_id and d.is_available(self.current_time)]
+                depot_orders = orders_by_depot.get(depot_id, [])
                 
-                if verbose:
-                    print(f"Built {len(new_trips)} candidate trips")
-            
-            # Select best trips
-            all_candidate_trips = new_trips + [t for t in self.active_trips if not t.is_executed]
-            
-            selected_trips = []
-            drone_assignments = {}
-            
-            if all_candidate_trips:
-                available_drones = [d for d in self.drones if d.is_available(self.current_time)]
+                if not depot_trips or not depot_drones:
+                    continue
                 
-                selected_trips, drone_assignments = self.trip_selector.select_trips(
-                    all_candidate_trips,
-                    unassigned_orders,
-                    available_drones,
+                # 为该仓库选择trips
+                selected, assignments = self.trip_selector.select_trips(
+                    depot_trips,
+                    depot_orders,
+                    depot_drones,
                     self.current_time
                 )
+                all_selected_trips.extend(selected)
                 
-                decision_info["trips_selected"] = len(selected_trips)
-                
-                if verbose:
-                    print(f"Selected {len(selected_trips)} trips")
+                # 分配trips到无人机
+                if selected:
+                    trip_assignments = self.trip_assigner.assign_trips(
+                        selected,
+                        depot_drones,
+                        self.current_time,
+                        assignments
+                    )
+                    
+                    for drone_id, trip_schedule in trip_assignments.items():
+                        for trip, start_time in trip_schedule:
+                            self._dispatch_trip(drone_id, trip, start_time)
+                            decision_info["trips_assigned"] += 1
             
-            # Assign selected trips to drones
-            if selected_trips:
-                available_drones = [d for d in self.drones if d.is_available(self.current_time)]
-                assignments = self.trip_assigner.assign_trips(
-                    selected_trips,
-                    available_drones,
-                    self.current_time,
-                    drone_assignments
-                )
-                
-                for drone_id, trip_schedule in assignments.items():
-                    for trip, start_time in trip_schedule:
-                        self._dispatch_trip(drone_id, trip, start_time)
-                        decision_info["trips_assigned"] += 1
-                
-                if verbose:
-                    print(f"Assigned {decision_info['trips_assigned']} trips to drones")
+            decision_info["trips_selected"] = len(all_selected_trips)
+            
+            if verbose:
+                print(f"选择 {len(all_selected_trips)} 行程, 分配 {decision_info['trips_assigned']} 行程")
         
         # Execute drone state machine for Ψ time units
         for drone in self.drones:
@@ -604,9 +514,9 @@ class Simulator:
         if drone is None:
             return
         
-        # 多仓库：获取无人机所属仓库的BatteryManager
-        depot_id = drone.home_depot_id if drone.home_depot_id is not None else 0
-        battery_manager = self.battery_managers.get(depot_id, self.battery_manager)
+        # 获取无人机所属仓库的BatteryManager
+        depot_id = drone.home_depot_id
+        battery_manager = self.battery_managers.get(depot_id)
         
         # Check battery
         if drone.battery is None or not battery_manager.can_complete_trip(
@@ -699,14 +609,14 @@ class Simulator:
                 drone = next((d for d in self.drones if d.id == trip.drone_id), None)
                 if drone:
                     drone.status = DroneStatus.IDLE
-                    # 多仓库：无人机返回其所属仓库
-                    drone.location = drone.home_depot_location.copy() if drone.home_depot_location is not None else DEPOT_LOCATION.copy()
+                    # 无人机返回其所属仓库
+                    drone.location = drone.home_depot_location.copy()
                     drone.current_trip = None
                     drone.total_distance += trip.total_distance
                     
-                    # 多仓库：获取无人机所属仓库的BatteryManager
-                    depot_id = drone.home_depot_id if drone.home_depot_id is not None else 0
-                    battery_manager = self.battery_managers.get(depot_id, self.battery_manager)
+                    # 获取无人机所属仓库的BatteryManager
+                    depot_id = drone.home_depot_id
+                    battery_manager = self.battery_managers.get(depot_id)
                     
                     # Return battery for charging if low
                     if drone.battery and drone.battery.current_charge < E_MAX * 0.3:
@@ -725,21 +635,22 @@ class Simulator:
         self.executing_trips = still_executing
         self.completed_trips.extend(completed)
         
-        # Update time
+        # 更新时间
         self.current_time = new_time
         
-        # Update battery charging
-        self.battery_manager.update_charging(new_time)
+        # 更新所有仓库的电池充电状态
+        for battery_manager in self.battery_managers.values():
+            battery_manager.update_charging(new_time)
         
         return new_orders
     
     def get_state(self) -> State:
-        """Get current simulation state"""
+        """获取当前仿真状态"""
         return State(
             time=self.current_time,
             pending_orders=self.pending_orders.copy(),
             active_trips=self.active_trips.copy(),
             executing_trips=self.executing_trips.copy(),
             drones=self.drones.copy(),
-            depot=self.depot
+            depot=self.depots[0] if self.depots else None
         )
