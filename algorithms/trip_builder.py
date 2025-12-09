@@ -1,12 +1,12 @@
 """
-Trip Construction Algorithm (Algorithm 3 & 4 from the paper)
-Backward Label-setting Heuristic for generating feasible trips
+行程构造算法（论文中的算法3和算法4）
+使用反向标号（Backward Label-setting）的启发式方法生成可行行程
 
-Key concepts:
-- Build trips backward from depot to handle payload-dependent energy correctly
-- Use urgency-based insertion priority
-- Apply Pareto domination rules to prune inferior trips
-- Enforce chance constraints for energy feasibility
+核心思想：
+- 从仓库反向构建行程，以正确处理与载重相关的能耗
+- 使用基于紧急度的插入优先级
+- 应用帕累托支配规则剪枝劣质行程
+- 通过机会约束保证能耗可行性
 """
 
 import numpy as np
@@ -26,20 +26,20 @@ from config import MAX_PAYLOAD, SERVICE_TIME, DRONE_SPEED_MEAN
 @dataclass
 class Label:
     """
-    Label for backward label-setting algorithm
+    反向标号算法中的标签结构
     
-    Represents a partial trip built backward from depot
+    表示从仓库反向构建的一个部分行程
     
-    Attributes:
-        orders: Orders in this partial trip (in reverse visit order)
-        total_weight: Total payload weight
-        expected_energy: Expected energy consumption
-        energy_std: Standard deviation of energy consumption
-        total_distance: Total route distance
-        last_location: Location of the last added customer (first to visit)
-        visited_ids: Set of visited customer IDs
-        earliest_start: Earliest feasible start time
-        is_dominated: Whether this label is dominated by another
+    属性:
+        orders: 此部分行程中的订单（按访问顺序的反向存储）
+        total_weight: 当前总载重
+        expected_energy: 预期能耗
+        energy_std: 能耗标准差
+        total_distance: 总路程距离
+        last_location: 最后添加的客户位置（将被最先访问）
+        visited_ids: 已访问客户ID集合
+        earliest_start: 最早可行的出发时间
+        is_dominated: 是否被其他标签支配
     """
     orders: List[Order] = field(default_factory=list)
     total_weight: float = 0.0
@@ -52,7 +52,7 @@ class Label:
     is_dominated: bool = False
     
     def copy(self) -> 'Label':
-        """Create a deep copy of this label"""
+        """创建当前标签的深拷贝"""
         new_label = Label(
             orders=self.orders.copy(),
             total_weight=self.total_weight,
@@ -69,7 +69,8 @@ class Label:
 
 class TripBuilder:
     """
-    Builds feasible trips using backward label-setting heuristic
+    使用反向标号启发式构建可行行程
+    支持多仓库场景：每个仓库独立构建路径
     
     Algorithm 3: BuildTrips
     - Generates a pool of feasible trips from pending orders
@@ -86,7 +87,9 @@ class TripBuilder:
         service_time: float = SERVICE_TIME,
         speed: float = DRONE_SPEED_MEAN,
         max_customers_per_trip: int = 5,
-        max_labels: int = 100
+        max_labels: int = 100,
+        depot_id: int = None,  # 多仓库：仓库ID
+        depot_location: np.ndarray = None  # 多仓库：仓库位置
     ):
         self.depot = depot
         self.energy_model = energy_model
@@ -96,6 +99,10 @@ class TripBuilder:
         self.max_customers_per_trip = max_customers_per_trip
         self.max_labels = max_labels
         self._trip_counter = 0
+        
+        # 多仓库支持
+        self.depot_id = depot_id if depot_id is not None else getattr(depot, 'id', 0)
+        self.depot_location = depot_location if depot_location is not None else depot.location
     
     def build_trips(
         self,
@@ -134,7 +141,9 @@ class TripBuilder:
             id=self._get_next_trip_id(),
             orders=[],
             total_distance=0.0,
-            expected_energy=0.0
+            expected_energy=0.0,
+            depot_id=self.depot_id,  # 多仓库：设置出发仓库
+            depot_location=self.depot_location  # 多仓库：设置仓库位置
         )
         trips_being_built: List[Trip] = [initial_trip]
         
@@ -178,7 +187,7 @@ class TripBuilder:
         return completed_trips
     
     def _get_next_trip_id(self) -> int:
-        """Get next unique trip ID"""
+        """获取下一个唯一的行程ID"""
         self._trip_counter += 1
         return self._trip_counter
     
@@ -191,41 +200,40 @@ class TripBuilder:
         strategy: str
     ) -> List[Order]:
         """
-        Algorithm 4: select_vertices_to_insert
+        算法4: select_vertices_to_insert
         
-        Input: Trip γ; Σ, the maximum size of set V
-        Output: Set of vertices V
+        输入: 行程 γ；Σ 为集合 V 的最大大小
+        输出: 顶点集合 V
         
-        Selects up to Σ vertices that can be inserted into trip γ,
-        exploring neighbors of the first vertex i_r in the trip.
+        从行程 γ 的第一个顶点 i_r 出发，在其邻域中选出最多 Σ 个可插入的订单。
         """
-        # Line 1: Let i_r ∈ γ be the first location to be visited by trip γ, after depot i_0
-        # In backward construction, trip.orders[0] is the first customer after depot
+        # Line 1: 令 i_r ∈ γ 为行程 γ 中在仓库 i_0 之后访问的第一个位置
+        # 在反向构造中，trip.orders[0] 就是仓库之后访问的第一个客户
         if trip.orders:
             i_r = trip.orders[0]
             i_r_location = i_r.location
         else:
-            # Empty trip, use depot as reference
+            # 空行程，使用仓库位置作为参考点
             i_r = None
             i_r_location = self.depot.location
         
-        # Get IDs already in trip
+        # 获取当前行程中已有的订单ID
         trip_order_ids = {o.id for o in trip.orders}
         current_weight = sum(o.weight for o in trip.orders)
         
-        # Build neighbor sets I^d(i_r) and I^l(i_r)
-        # I^d: sorted by distance from i_r
-        # I^l: sorted by urgency (deadline)
+        # 构造邻居集合 I^d(i_r) 和 I^l(i_r)
+        # I^d: 按与 i_r 的距离排序
+        # I^l: 按紧急度（截止时间）排序
         available_orders = [o for o in all_orders if o.id not in trip_order_ids]
         
         if strategy == "distance":
-            # I^d(i_r): neighbors sorted by distance
+            # I^d(i_r): 按距离排序的邻居集合
             neighbor_set = sorted(
                 available_orders,
                 key=lambda o: euclidean_distance(o.location, i_r_location)
             )
         else:  # "urgency" or default
-            # I^l(i_r): neighbors sorted by urgency (deadline proximity)
+            # I^l(i_r): 按紧急度排序的邻居集合（截止时间更早更优先）
             neighbor_set = sorted(
                 available_orders,
                 key=lambda o: o.urgency(current_time)
@@ -234,21 +242,21 @@ class TripBuilder:
         # Line 2: V ← ∅
         V: List[Order] = []
         
-        # Line 3: while |V| < Σ and there is a neighbor vertex of i_r to be explored do
+        # Line 3: while |V| < Σ 且 i_r 还有邻居待探索时执行
         while len(V) < sigma and neighbor_set:
-            # Line 4: i_p ← select_first_neighbor(I^d(i_r)) or select_first_neighbor(I^l(i_r))
-            # Select from the correct neighbor set, following the sorting policy
+            # Line 4: i_p ← select_first_neighbor(I^d(i_r)) 或 select_first_neighbor(I^l(i_r))
+            # 根据排序策略，从对应邻居集合中选择第一个元素
             i_p = neighbor_set[0]
             
-            # Line 5: if inequalities (6) and (7) hold when inserting i_p into γ then
-            # Check constraint (6): Weight constraint Q - sum(q) >= q_{i_p}
+            # Line 5: 如果 i_p 插入 γ 后仍满足不等式 (6) 和 (7)
+            # 检查约束 (6): 载重约束 Q - sum(q) >= q_{i_p}
             weight_feasible = (current_weight + i_p.weight <= self.max_payload)
             
-            # Check constraint (7): Energy chance constraint
-            # Also check max customers constraint
+            # 检查约束 (7): 能耗机会约束
+            # 同时检查最大客户数约束
             energy_feasible = False
             if weight_feasible and len(trip.orders) < self.max_customers_per_trip:
-                test_orders = [i_p] + trip.orders  # Backward insertion
+                test_orders = [i_p] + trip.orders  # 反向插入
                 energy_result = self.energy_model.compute_trip_energy_from_orders(
                     self.depot.location,
                     test_orders
@@ -260,8 +268,8 @@ class TripBuilder:
                 V.append(i_p)
             # Line 7: end
             
-            # Line 8: I^d(i_r) ← I^d(i_r) \ i_p or I^l(i_r) ← I^l(i_r) \ i_p
-            # Remove i_p from the correct neighbor set
+            # Line 8: I^d(i_r) ← I^d(i_r) \ i_p 或 I^l(i_r) ← I^l(i_r) \ i_p
+            # 从相应的邻居集合中移除 i_p
             neighbor_set.pop(0)
         # Line 9: end
         
@@ -275,14 +283,14 @@ class TripBuilder:
         current_time: float
     ) -> Optional[Trip]:
         """
-        Create a new trip by inserting order at the front (backward insertion)
+        通过在行程前端插入订单（反向插入）创建新行程
         
-        Returns None if insertion is infeasible
+        如果插入后不可行，则返回 None
         """
-        # Create new order list with backward insertion
+        # 使用反向插入创建新的订单列表
         new_orders = [order] + trip.orders
         
-        # Check energy feasibility
+        # 检查能耗可行性
         energy_result = self.energy_model.compute_trip_energy_from_orders(
             self.depot.location,
             new_orders
@@ -291,31 +299,33 @@ class TripBuilder:
         if not energy_result.is_feasible:
             return None
         
-        # Calculate new distance
-        route = [self.depot.location] + [o.location for o in new_orders] + [self.depot.location]
+        # 计算新行程的总距离
+        route = [self.depot_location] + [o.location for o in new_orders] + [self.depot_location]
         new_distance = compute_route_distance(route)
         
-        # Create new trip
+        # 创建新的行程对象
         new_trip = Trip(
             id=self._get_next_trip_id(),
             orders=new_orders,
             expected_energy=energy_result.expected_energy,
             energy_std=energy_result.energy_std,
             total_distance=new_distance,
-            total_weight=sum(o.weight for o in new_orders)
+            total_weight=sum(o.weight for o in new_orders),
+            depot_id=self.depot_id,  # 多仓库：设置出发仓库
+            depot_location=self.depot_location  # 多仓库：设置仓库位置
         )
         
         return new_trip
     
     def _is_dominated_by_any(self, trip: Trip, trip_set: List[Trip]) -> bool:
-        """Check if trip is dominated by any trip in the set"""
+        """检查该行程是否被集合中的其他行程支配"""
         trip_customers = trip.get_customer_ids()
         
         for other in trip_set:
             other_customers = other.get_customer_ids()
             
-            # Check if other dominates trip
-            # Domination: same or more customers, less or equal cost
+            # 检查 other 是否支配 trip
+            # 支配条件：客户数不小于且成本（距离、能耗）不大于
             if other_customers >= trip_customers:  # Superset or equal
                 if other.total_distance <= trip.total_distance:
                     if other.expected_energy <= trip.expected_energy:
@@ -328,8 +338,8 @@ class TripBuilder:
         return False
     
     def _select_best_trips(self, trips: List[Trip]) -> List[Trip]:
-        """Select best trips when exceeding max_labels"""
-        # Score by: more customers, less energy, less distance
+        """当标签数量超过上限时选取质量最好的若干行程"""
+        # 评分规则：客户更多、能耗更低、距离更短
         def score(trip: Trip) -> Tuple[int, float, float]:
             return (
                 -len(trip.orders),
@@ -346,12 +356,12 @@ class TripBuilder:
         current_time: float,
         strategy: str
     ) -> List[Order]:
-        """Sort orders by insertion priority"""
+        """根据插入优先级对订单排序"""
         if strategy == "urgency":
-            # Sort by urgency (ascending = most urgent first)
+            # 按紧急度排序（升序 = 最紧急优先）
             return sorted(orders, key=lambda o: o.urgency(current_time))
         elif strategy == "distance":
-            # Sort by distance from depot (ascending)
+            # 按与仓库的距离排序（升序）
             return sorted(
                 orders,
                 key=lambda o: euclidean_distance(o.location, self.depot.location)
@@ -366,45 +376,44 @@ class TripBuilder:
         current_time: float
     ) -> Optional[Label]:
         """
-        Try to extend a label by adding an order at the front
+        通过在前端添加订单尝试扩展一个标签
         
-        This is the backward extension: we're adding a customer that will be
-        visited BEFORE the customers already in the label.
+        这是反向扩展：新增的客户会在标签中已有客户之前被访问。
         
-        Returns None if extension is infeasible.
+        如果扩展不可行，则返回 None。
         """
-        # Check if already visited
+        # 检查是否已访问过
         if order.id in label.visited_ids:
             return None
         
-        # Check payload constraint
+        # 检查载重约束
         new_weight = label.total_weight + order.weight
         if new_weight > self.max_payload:
             return None
         
-        # Check max customers
+        # 检查最大客户数
         if len(label.orders) >= self.max_customers_per_trip:
             return None
         
         # Calculate new distance
         if label.last_location is not None:
-            # Distance from new order to previous first customer
+            # 新订单到先前第一个客户的距离
             if len(label.orders) > 0:
                 dist_to_next = euclidean_distance(order.location, label.orders[0].location)
             else:
-                # First customer, distance to depot (return leg)
+                # 第一个客户，与仓库之间的距离（返程段）
                 dist_to_next = euclidean_distance(order.location, self.depot.location)
             
-            # Distance from depot to new order
+            # 仓库到新订单的距离
             dist_from_depot = euclidean_distance(self.depot.location, order.location)
         else:
             dist_to_next = 0
             dist_from_depot = euclidean_distance(self.depot.location, order.location)
         
-        # Build the new route for energy calculation
+        # 构建新路线用于能耗计算
         new_orders = [order] + label.orders
         
-        # Check energy feasibility with chance constraint
+        # 在机会约束下检查能耗可行性
         energy_result = self.energy_model.compute_trip_energy_from_orders(
             self.depot.location,
             new_orders
@@ -413,21 +422,21 @@ class TripBuilder:
         if not energy_result.is_feasible:
             return None
         
-        # Calculate new total distance
+        # 计算新的总距离
         new_distance = compute_route_distance(
             [self.depot.location] + [o.location for o in new_orders] + [self.depot.location]
         )
         
-        # Calculate earliest start time (must allow enough time to reach deadline)
-        travel_time = new_distance / self.speed / 60.0  # minutes
+        # 计算最早出发时间（必须留出足够时间满足截止时间）
+        travel_time = new_distance / self.speed / 60.0  # 单位：分钟
         service_time = len(new_orders) * self.service_time
         total_trip_time = travel_time + service_time
         
-        # Earliest start based on most urgent order's deadline
+        # 根据最紧急订单的截止时间计算最早出发时间
         min_deadline = min(o.deadline for o in new_orders)
         earliest_start = max(current_time, min_deadline - total_trip_time)
         
-        # Create extended label
+        # 构造扩展后的标签
         extended = Label(
             orders=new_orders,
             total_weight=new_weight,
@@ -444,17 +453,17 @@ class TripBuilder:
     
     def _prune_dominated(self, labels: List[Label]) -> List[Label]:
         """
-        Apply Pareto domination rules (Algorithm 4)
+        应用帕累托支配规则（算法4）
         
-        A label L1 dominates L2 if:
-        - L1 serves the same or more customers
-        - L1 has lower or equal energy consumption
-        - L1 has lower or equal distance
+        标签 L1 支配 L2 的条件：
+        - L1 服务的客户数不少于 L2
+        - L1 的能耗不高于 L2
+        - L1 的距离不长于 L2
         """
         if len(labels) <= 1:
             return labels
         
-        # Mark dominated labels
+        # 标记被支配的标签
         for i, l1 in enumerate(labels):
             if l1.is_dominated:
                 continue
@@ -469,19 +478,19 @@ class TripBuilder:
         return [l for l in labels if not l.is_dominated]
     
     def _dominates(self, l1: Label, l2: Label) -> bool:
-        """Check if l1 Pareto-dominates l2"""
-        # l1 must be at least as good in all criteria
+        """检查 l1 是否在帕累托意义上支配 l2"""
+        # l1 在所有指标上都不能比 l2 更差
         same_customers = l1.visited_ids == l2.visited_ids
         more_customers = l1.visited_ids.issuperset(l2.visited_ids) and len(l1.visited_ids) > len(l2.visited_ids)
         
         if not (same_customers or more_customers):
             return False
         
-        # l1 must have lower or equal energy and distance
+        # l1 的能耗和距离必须不高于 l2
         better_energy = l1.expected_energy <= l2.expected_energy
         better_distance = l1.total_distance <= l2.total_distance
         
-        # Must be strictly better in at least one criterion
+        # 至少在一个指标上要严格更好
         strictly_better = (
             l1.expected_energy < l2.expected_energy or
             l1.total_distance < l2.total_distance or
@@ -491,8 +500,8 @@ class TripBuilder:
         return better_energy and better_distance and strictly_better
     
     def _select_best_labels(self, labels: List[Label]) -> List[Label]:
-        """Select top labels when exceeding max_labels"""
-        # Score by: more customers, less energy, less distance
+        """当标签数量超过上限时选取评分最优的若干标签"""
+        # 评分规则：客户更多、能耗更低、距离更短
         def score(label: Label) -> Tuple[int, float, float]:
             return (
                 -len(label.orders),  # More customers = better (negative for ascending sort)
@@ -504,7 +513,7 @@ class TripBuilder:
         return sorted_labels[:self.max_labels]
     
     def _label_to_trip(self, label: Label) -> Optional[Trip]:
-        """Convert a label to a Trip object"""
+        """将标签转换为 Trip 对象"""
         if not label.orders:
             return None
         
@@ -516,7 +525,9 @@ class TripBuilder:
             expected_energy=label.expected_energy,
             energy_std=label.energy_std,
             total_distance=label.total_distance,
-            total_weight=label.total_weight
+            total_weight=label.total_weight,
+            depot_id=self.depot_id,  # 多仓库：设置出发仓库
+            depot_location=self.depot_location  # 多仓库：设置仓库位置
         )
         
         return trip
@@ -526,8 +537,8 @@ class TripBuilder:
         order: Order,
         current_time: float
     ) -> Optional[Trip]:
-        """Create a trip serving only one customer"""
-        # Check energy feasibility
+        """创建仅服务单个客户的行程"""
+        # 检查能耗可行性
         energy_result = self.energy_model.compute_trip_energy_from_orders(
             self.depot.location,
             [order]
@@ -536,7 +547,7 @@ class TripBuilder:
         if not energy_result.is_feasible:
             return None
         
-        distance = 2 * euclidean_distance(self.depot.location, order.location)
+        distance = 2 * euclidean_distance(self.depot_location, order.location)
         
         self._trip_counter += 1
         
@@ -546,7 +557,9 @@ class TripBuilder:
             expected_energy=energy_result.expected_energy,
             energy_std=energy_result.energy_std,
             total_distance=distance,
-            total_weight=order.weight
+            total_weight=order.weight,
+            depot_id=self.depot_id,  # 多仓库：设置出发仓库
+            depot_location=self.depot_location  # 多仓库：设置仓库位置
         )
     
     def _remove_duplicates(self, trips: List[Trip]) -> List[Trip]:
@@ -594,18 +607,18 @@ class TripBuilder:
         remaining_orders = new_orders.copy()  # D'_k ∪ U'_k
         
         # Line 2: Γ'(s_{k-1}, s_k) ← {γ ∈ Γ(s_{k-1}, s_k) : no lateness and dispatching time ∈ [t_k, t_k + υ]}
-        # Filter trips: no lateness AND dispatching time in [t_k, t_k + υ]
+        # 过滤行程：无延迟且发车时间在 [t_k, t_k + υ] 区间内
         eligible_trips = []
         for trip in existing_trips:
             if trip.is_executed or trip.is_cancelled:
                 continue
             
-            # Check dispatching time is in [t_k, t_k + υ]
+            # 检查发车时间是否在 [t_k, t_k + υ] 范围内
             if trip.planned_start_time is not None:
                 if not (current_time <= trip.planned_start_time <= current_time + threshold_v):
                     continue
             
-            # Check no lateness: max_lateness should be 0
+            # 检查是否无延迟：max_lateness 应为 0
             if trip.planned_start_time is not None:
                 lateness = trip.max_lateness(trip.planned_start_time, self.speed)
                 if lateness > 0:
@@ -615,7 +628,7 @@ class TripBuilder:
         
         # Line 3: for each r ∈ D_k ∪ U_k do
         for order in new_orders:
-            if order in remaining_orders:  # Still not assigned
+            if order in remaining_orders:  # 仍未被分配
                 # Line 4: γ ← find_best_trip_for_request(Γ'(s_{k-1}, s_k), i_r)
                 best_trip, best_position, delta_psi = self._find_best_trip_for_request(
                     eligible_trips, order, current_time
@@ -623,11 +636,11 @@ class TripBuilder:
                 
                 # Line 5: if γ ≠ ∅ and Δψ(γ, i_r) = 0 then
                 if best_trip is not None and delta_psi == 0:
-                    # Line 6: γ ← γ ∪ {i_r} - i_r is inserted on γ in the correct position
+                    # Line 6: γ ← γ ∪ {i_r} - 将 i_r 插入到 γ 的合适位置
                     best_trip.orders.insert(best_position, order)
                     best_trip.total_weight += order.weight
                     
-                    # Recalculate trip properties
+                    # 重新计算行程属性
                     energy_result = self.energy_model.compute_trip_energy_from_orders(
                         self.depot.location, best_trip.orders
                     )
@@ -654,25 +667,26 @@ class TripBuilder:
         current_time: float
     ) -> Tuple[Optional[Trip], Optional[int], float]:
         """
-        Find the best trip to insert a request (Algorithm 5, Line 4)
+        为给定请求查找最合适的插入行程（算法5，第4行）
         
         Returns:
-            Tuple of (best_trip, best_position, delta_psi)
-            where delta_psi is the additional lateness from insertion
+            (best_trip, best_position, delta_psi) 三元组
+            其中 delta_psi 为插入导致的新增延迟
         """
         best_trip = None
         best_position = None
         best_delta_psi = float('inf')
         best_insertion_cost = float('inf')
         
+        # 遍历所有可行的行程
         for trip in eligible_trips:
-            # Check weight constraint
+            # 检查载重约束
             if trip.total_weight + order.weight > self.max_payload:
                 continue
             
-            # Try each insertion position
+            # 尝试每一个插入位置
             for pos in range(len(trip.orders) + 1):
-                # Check energy feasibility
+                # 检查能耗可行性
                 test_orders = trip.orders[:pos] + [order] + trip.orders[pos:]
                 energy_result = self.energy_model.compute_trip_energy_from_orders(
                     self.depot.location, test_orders
@@ -681,24 +695,24 @@ class TripBuilder:
                 if not energy_result.is_feasible:
                     continue
                 
-                # Calculate Δψ(γ, i_r) - additional lateness from insertion
+                # 计算 Δψ(γ, i_r) - 插入带来的新增延迟
                 original_lateness = trip.max_lateness(
                     trip.planned_start_time or current_time, self.speed
                 )
                 
-                # Create temporary trip to calculate new lateness
+                # 创建临时行程以计算新的延迟
                 new_lateness = self._calculate_trip_lateness(
                     test_orders, trip.planned_start_time or current_time
                 )
                 
                 delta_psi = new_lateness - original_lateness
                 
-                # Calculate insertion cost (distance)
+                # 计算插入代价（距离增加）
                 insertion_cost = self._calculate_insertion_cost(
                     trip.orders, order, pos
                 )
                 
-                # Prefer: delta_psi = 0, then minimum insertion cost
+                # 优先选择 delta_psi = 0，其次选择插入代价最小
                 if delta_psi < best_delta_psi or (delta_psi == best_delta_psi and insertion_cost < best_insertion_cost):
                     best_trip = trip
                     best_position = pos
@@ -712,18 +726,18 @@ class TripBuilder:
         orders: List[Order],
         start_time: float
     ) -> float:
-        """Calculate total lateness for a trip"""
+        """计算一个行程的总最大延迟"""
         current_time = start_time
         current_loc = self.depot.location
         total_lateness = 0.0
         
         for order in orders:
-            # Travel time
+            # 旅行时间
             dist = euclidean_distance(current_loc, order.location)
-            travel_time = dist / self.speed / 60.0  # Convert to minutes
+            travel_time = dist / self.speed / 60.0  # 转换为分钟
             current_time += travel_time
             
-            # Calculate lateness for this order
+            # 计算该订单的延迟
             lateness = max(0, current_time - order.deadline)
             total_lateness = max(total_lateness, lateness)
             
@@ -738,27 +752,27 @@ class TripBuilder:
         new_order: Order,
         position: int
     ) -> float:
-        """Calculate additional distance from inserting order at position"""
+        """计算在给定位置插入订单所增加的额外距离"""
         if not current_orders:
-            # First customer
-            return 2 * euclidean_distance(self.depot.location, new_order.location)
+            # 第一个客户
+            return 2 * euclidean_distance(self.depot_location, new_order.location)
         
         if position == 0:
-            # Insert at beginning
-            prev_loc = self.depot.location
+            # 插入到开头
+            prev_loc = self.depot_location
             next_loc = current_orders[0].location
         elif position == len(current_orders):
-            # Insert at end
+            # 插入到末尾
             prev_loc = current_orders[-1].location
-            next_loc = self.depot.location
+            next_loc = self.depot_location
         else:
             prev_loc = current_orders[position - 1].location
             next_loc = current_orders[position].location
         
-        # Original distance
+        # 原始距离
         original_dist = euclidean_distance(prev_loc, next_loc)
         
-        # New distance through new_order
+        # 通过新订单后的新距离
         new_dist = (
             euclidean_distance(prev_loc, new_order.location) +
             euclidean_distance(new_order.location, next_loc)
@@ -771,18 +785,18 @@ class TripBuilder:
         orders: List[Order],
         start_time: float
     ) -> bool:
-        """Check if all orders can be served before their deadlines"""
+        """检查在给定出发时间下是否能在截止时间前（允许一定宽限）完成所有订单"""
         current_time = start_time
-        current_loc = self.depot.location
+        current_loc = self.depot_location
         
         for order in orders:
-            # Travel time
+            # 旅行时间
             dist = euclidean_distance(current_loc, order.location)
             travel_time = dist / self.speed / 60.0
             current_time += travel_time
             
-            # Allow some lateness (soft deadline)
-            # Here we just check if it's not too late
+            # 允许一定的延迟（软截止时间）
+            # 这里只检查是否“过于”延迟
             if current_time > order.deadline + 60:  # Allow up to 60 min late
                 return False
             

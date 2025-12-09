@@ -22,7 +22,8 @@ from typing import Optional
 from simulation.simulator import Simulator
 from simulation.order_generator import OrderGenerator
 from config import (
-    NUM_DRONES, NUM_BATTERIES, T_HORIZON, PSI, M_MAX_TRIPS
+    NUM_DRONES, NUM_BATTERIES, T_HORIZON, PSI, M_MAX_TRIPS,
+    NUM_DEPOTS, DRONES_PER_DEPOT, BATTERIES_PER_DEPOT, DEFAULT_DEPOT_INFOS
 )
 
 
@@ -35,14 +36,18 @@ def run_single_simulation(
     max_trips_per_drone: int = M_MAX_TRIPS,
     dynamic_orders: bool = True,
     seed: Optional[int] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    multi_depot_mode: bool = True,  # 多仓库模式
+    drones_per_depot: int = DRONES_PER_DEPOT,  # 每个仓库的无人机数
+    batteries_per_depot: int = BATTERIES_PER_DEPOT  # 每个仓库的电池数
 ):
     """
     Run a single simulation instance
+    支持多仓库场景
     
     Args:
-        num_drones: Number of drones in fleet
-        num_batteries: Total number of batteries
+        num_drones: Number of drones in fleet (单仓库模式)
+        num_batteries: Total number of batteries (单仓库模式)
         num_initial_orders: Number of orders at time 0
         time_horizon: Total simulation time (minutes)
         decision_interval: Time between decision epochs (minutes)
@@ -50,10 +55,17 @@ def run_single_simulation(
         dynamic_orders: Whether to generate dynamic orders
         seed: Random seed for reproducibility
         verbose: Print progress information
+        multi_depot_mode: 是否启用多仓库模式
+        drones_per_depot: 每个仓库的无人机数量
+        batteries_per_depot: 每个仓库的电池数量
     """
     print("=" * 60)
-    print("DRPUDEC Simulation")
-    print("Dynamic Drone Routing with Uncertain Demand and Energy")
+    if multi_depot_mode:
+        print("DRPUDEC Multi-Depot Simulation")
+        print(f"多仓库无人机路径规划 - {NUM_DEPOTS}个仓库")
+    else:
+        print("DRPUDEC Simulation")
+        print("Dynamic Drone Routing with Uncertain Demand and Energy")
     print("=" * 60)
     
     # Create simulator
@@ -63,7 +75,10 @@ def run_single_simulation(
         time_horizon=time_horizon,
         decision_interval=decision_interval,
         max_trips_per_drone=max_trips_per_drone,
-        seed=seed
+        seed=seed,
+        multi_depot_mode=multi_depot_mode,
+        drones_per_depot=drones_per_depot,
+        batteries_per_depot=batteries_per_depot
     )
     
     # Generate initial orders
@@ -71,8 +86,17 @@ def run_single_simulation(
     initial_orders = order_gen.generate_initial_orders(num_initial_orders)
     
     print(f"\nConfiguration:")
-    print(f"  Drones: {num_drones}")
-    print(f"  Batteries: {num_batteries}")
+    if multi_depot_mode:
+        print(f"  Mode: Multi-Depot (多仓库模式)")
+        print(f"  Depots: {NUM_DEPOTS}")
+        print(f"  Drones per depot: {drones_per_depot}")
+        print(f"  Batteries per depot: {batteries_per_depot}")
+        print(f"  Total drones: {NUM_DEPOTS * drones_per_depot}")
+        print(f"  Total batteries: {NUM_DEPOTS * batteries_per_depot}")
+    else:
+        print(f"  Mode: Single-Depot (单仓库模式)")
+        print(f"  Drones: {num_drones}")
+        print(f"  Batteries: {num_batteries}")
     print(f"  Initial orders: {num_initial_orders}")
     print(f"  Time horizon: {time_horizon} minutes")
     print(f"  Decision interval: {decision_interval} minutes")
@@ -105,16 +129,21 @@ def run_single_simulation(
 
 def run_comparison(
     num_runs: int = 5,
-    seed_base: int = 42
+    seed_base: int = 42,
+    multi_depot_mode: bool = True  # 多仓库模式
 ):
     """
     Run comparison between CFA and Myopic policies
+    支持多仓库场景
     
     CFA: Uses M parameter to limit trips per drone
     Myopic: M = infinity (no limit)
     """
     print("=" * 60)
-    print("POLICY COMPARISON: CFA vs Myopic")
+    if multi_depot_mode:
+        print(f"POLICY COMPARISON: CFA vs Myopic (Multi-Depot, {NUM_DEPOTS} depots)")
+    else:
+        print("POLICY COMPARISON: CFA vs Myopic")
     print("=" * 60)
     
     cfa_results = []
@@ -128,7 +157,8 @@ def run_comparison(
         print("\nRunning CFA policy (M=2)...")
         simulator_cfa = Simulator(
             max_trips_per_drone=2,
-            seed=seed
+            seed=seed,
+            multi_depot_mode=multi_depot_mode
         )
         order_gen = OrderGenerator(seed=seed)
         initial_orders = order_gen.generate_initial_orders(10)
@@ -143,7 +173,8 @@ def run_comparison(
         print("Running Myopic policy (M=100)...")
         simulator_myopic = Simulator(
             max_trips_per_drone=100,  # Effectively unlimited
-            seed=seed
+            seed=seed,
+            multi_depot_mode=multi_depot_mode
         )
         order_gen = OrderGenerator(seed=seed)
         initial_orders = order_gen.generate_initial_orders(10)
@@ -221,8 +252,27 @@ def main():
         "--runs", type=int, default=5,
         help="Number of runs for comparison mode"
     )
+    parser.add_argument(
+        "--multi-depot", action="store_true", default=True,
+        help="Enable multi-depot mode (多仓库模式)"
+    )
+    parser.add_argument(
+        "--single-depot", action="store_true",
+        help="Use single-depot mode (单仓库模式)"
+    )
+    parser.add_argument(
+        "--drones-per-depot", type=int, default=DRONES_PER_DEPOT,
+        help="Number of drones per depot (每个仓库的无人机数)"
+    )
+    parser.add_argument(
+        "--batteries-per-depot", type=int, default=BATTERIES_PER_DEPOT,
+        help="Number of batteries per depot (每个仓库的电池数)"
+    )
     
     args = parser.parse_args()
+    
+    # 确定是否使用多仓库模式
+    multi_depot = not args.single_depot
     
     if args.mode == "single":
         run_single_simulation(
@@ -234,12 +284,16 @@ def main():
             max_trips_per_drone=args.max_trips,
             dynamic_orders=not args.no_dynamic,
             seed=args.seed,
-            verbose=not args.quiet
+            verbose=not args.quiet,
+            multi_depot_mode=multi_depot,
+            drones_per_depot=args.drones_per_depot,
+            batteries_per_depot=args.batteries_per_depot
         )
     elif args.mode == "compare":
         run_comparison(
             num_runs=args.runs,
-            seed_base=args.seed
+            seed_base=args.seed,
+            multi_depot_mode=multi_depot
         )
 
 

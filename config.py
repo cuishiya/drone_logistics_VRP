@@ -1,85 +1,100 @@
 """
-Configuration parameters for DRPUDEC (Dynamic Drone Routing Problem with Uncertain Demand and Energy Consumption)
-Based on: Chagas et al. (2025)
+DRPUDEC配置参数（动态无人机路径规划问题，考虑不确定需求和能耗）
+基于论文: Chagas et al. (2025)
 """
 
 import numpy as np
 
 # =============================================================================
-# Time Parameters
+# 时间参数
 # =============================================================================
-T_HORIZON = 480  # Total time horizon in minutes (8 hours)
-PSI = 30  # Decision epoch interval in minutes
-UPSILON = 5  # Buffer threshold for trip cancellation (minutes)
+T_HORIZON = 480  # 总时间范围（分钟，8小时）
+PSI = 30  # 决策周期间隔（分钟）
+UPSILON = 5  # 行程取消缓冲阈值（分钟）
 
 # =============================================================================
-# Drone Physical Parameters
+# 无人机物理参数
 # =============================================================================
-NUM_DRONES = 3  # Number of drones in the fleet
-DRONE_WEIGHT = 2.0  # Drone self-weight including battery (kg), denoted as ν
-MAX_PAYLOAD = 5.0  # Maximum payload capacity Q (kg)
-DRONE_SPEED_MEAN = 15.0  # Mean speed (m/s)
-DRONE_SPEED_STD = 2.0  # Speed standard deviation due to wind
+NUM_DRONES = 3  # 无人机数量
+DRONE_WEIGHT = 2.0  # 无人机自重（含电池，kg），记为ν
+MAX_PAYLOAD = 5.0  # 最大载重Q（kg）
+DRONE_SPEED_MEAN = 15.0  # 平均速度（m/s）
+DRONE_SPEED_STD = 2.0  # 速度标准差（受风速影响）
 
 # =============================================================================
-# Battery Parameters
+# 电池参数
 # =============================================================================
-NUM_BATTERIES = 5  # Total number of batteries (b)
-E_MAX = 500000.0  # Maximum battery capacity (Joules, ~140 Wh for typical drone battery)
-E_MIN = 50000.0  # Minimum safe battery level (10% reserve)
-CHARGE_RATE = 1000.0  # Charging rate (Joules per minute)
-BATTERY_SWAP_TIME = 2.0  # Time to swap battery (minutes)
+NUM_BATTERIES = 5  # 电池总数(b)
+E_MAX = 500000.0  # 最大电池容量（焦耳，约140Wh）
+E_MIN = 50000.0  # 最低安全电量（10%储备）
+CHARGE_RATE = 1000.0  # 充电速率（焦耳/分钟）
+BATTERY_SWAP_TIME = 2.0  # 电池更换时间（分钟）
 
 # =============================================================================
-# Energy Consumption Model Parameters
+# 能耗模型参数
 # =============================================================================
-GRAVITY = 9.81  # Gravitational acceleration (m/s^2)
-AIR_DENSITY = 1.225  # Air density ρ (kg/m^3)
-NUM_ROTORS = 4  # Number of rotors (n)
-ROTOR_DISC_AREA = 0.1  # Blade disc area parameter ζ (m^2)
+GRAVITY = 9.81  # 重力加速度（m/s^2）
+AIR_DENSITY = 1.225  # 空气密度ρ（kg/m^3）
+NUM_ROTORS = 4  # 旋翼数量(n)
+ROTOR_DISC_AREA = 0.1  # 旋翼盘面积参数ζ（m^2）
 
 # =============================================================================
-# Service Parameters
+# 服务参数
 # =============================================================================
-SERVICE_TIME = 2.0  # Fixed service time η at each customer (minutes)
+SERVICE_TIME = 2.0  # 每个客户的固定服务时间η（分钟）
 
 # =============================================================================
-# Cost Parameters (μ^c, μ^l from paper)
+# 成本参数（论文中的μ^c, μ^l）
 # =============================================================================
-DISTANCE_COST_RATE = 0.001  # μ^c: monetary cost per unit of distance (per meter)
-LATE_PENALTY_RATE = 1.0  # μ^l: penalty cost per minute of lateness
+DISTANCE_COST_RATE = 0.001  # μ^c: 单位距离成本（每米）
+LATE_PENALTY_RATE = 1.0  # μ^l: 每分钟延迟惩罚成本
 
 # =============================================================================
-# Chance Constraint Parameters
+# 机会约束参数
 # =============================================================================
-ALPHA = 0.90  # Safety probability for chance constraints
+ALPHA = 0.90  # 机会约束的安全概率
 # Φ^(-1)(0.90) ≈ 1.2816
 ALPHA_QUANTILE = 1.2816
 
 # =============================================================================
-# CFA Policy Parameters
+# CFA策略参数
 # =============================================================================
-M_MAX_TRIPS = 2  # Maximum trips per drone per decision epoch
+M_MAX_TRIPS = 2  # 每架无人机每决策周期最大行程数
 
 # =============================================================================
-# Order Generation (Poisson Process)
+# 订单生成（泊松过程）
 # =============================================================================
-LAMBDA_ORDERS = 0.5  # Average order arrival rate per minute
+LAMBDA_ORDERS = 0.5  # 平均订单到达率（每分钟）
 
 # =============================================================================
-# Problem Instance Parameters
+# 问题实例参数（多仓库）
 # =============================================================================
-DEPOT_LOCATION = np.array([0.0, 0.0])  # Depot coordinates
-AREA_SIZE = 10000.0  # Service area size (meters), customers in [-AREA_SIZE/2, AREA_SIZE/2]
+# 多仓库配置：从 depot.py 导入仓库信息
+from depot import (
+    DEFAULT_DEPOT_INFOS, DEPOT_LOCATIONS, NUM_DEPOTS,
+    get_service_area_bounds, DepotInfo
+)
+
+# 向后兼容：默认使用第一个仓库作为主仓库
+DEPOT_LOCATION = DEPOT_LOCATIONS[0] if DEPOT_LOCATIONS else np.array([0.0, 0.0])
+
+# 服务区域大小（基于仓库分布自动计算）
+_bounds = get_service_area_bounds()
+AREA_SIZE = max(_bounds[1] - _bounds[0], _bounds[3] - _bounds[2])  # 服务区域大小（米）
+AREA_BOUNDS = _bounds  # (min_x, max_x, min_y, max_y)
+
+# 多仓库无人机和电池分配
+DRONES_PER_DEPOT = 1  # 每个仓库的无人机数量
+BATTERIES_PER_DEPOT = 2  # 每个仓库的电池数量
 
 # =============================================================================
-# Solver Parameters
+# 求解器参数
 # =============================================================================
-GUROBI_TIME_LIMIT = 60  # Time limit for Gurobi solver (seconds)
-GUROBI_MIP_GAP = 0.01  # MIP gap tolerance
+GUROBI_TIME_LIMIT = 60  # Gurobi求解器时间限制（秒）
+GUROBI_MIP_GAP = 0.01  # MIP间隙容差
 
 # =============================================================================
-# Battery Reservation Policy
+# 电池预留策略
 # =============================================================================
-BATTERY_RESERVE_RATIO = 0.10  # Reserve 10% of batteries for emergencies
-URGENT_CUSTOMER_THRESHOLD = 0.10  # Threshold for using reserve batteries
+BATTERY_RESERVE_RATIO = 0.10  # 预留10%电池用于紧急情况
+URGENT_CUSTOMER_THRESHOLD = 0.10  # 使用预留电池的紧急客户阈值

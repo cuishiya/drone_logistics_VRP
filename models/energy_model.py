@@ -1,19 +1,19 @@
 """
-Energy Consumption Model with Chance Constraints
-Based on: Chagas et al. (2025) - Section on Random Energy Model
+带机会约束的能耗模型
+基于论文: Chagas et al. (2025) 中的随机能耗模型部分
 
-Energy consumption formula:
+能耗公式：
 e_{i_r, i_p}(q) = (d_{i_r, i_p} / ξ) * ((ν + q)^{3/2} * sqrt(g^3 / (2ρζn)))
 
-Where:
-- d: distance between nodes
-- ξ: random speed (affected by wind)
-- ν: drone self-weight
-- q: payload weight
-- g: gravity
-- ρ: air density
-- ζ: rotor disc area parameter
-- n: number of rotors
+其中：
+- d: 节点之间的距离
+- ξ: 随机速度（受风影响）
+- ν: 无人机自重
+- q: 载荷重量
+- g: 重力加速度
+- ρ: 空气密度
+- ζ: 旋翼盘面积参数
+- n: 旋翼数量
 """
 
 import numpy as np
@@ -34,18 +34,18 @@ from config import (
 
 @dataclass
 class EnergyResult:
-    """Result of energy consumption calculation"""
+    """能耗计算结果"""
     expected_energy: float  # E[CE]
     energy_std: float  # SDV(CE)
-    is_feasible: bool  # Whether chance constraint is satisfied
+    is_feasible: bool  # 是否满足机会约束
     safety_margin: float  # E_max - E_min - (E[CE] + Φ^{-1}(α) * SDV)
 
 
 class EnergyModel:
     """
-    Stochastic energy consumption model for drone routing
+    无人机路径规划中的随机能耗模型
     
-    Implements the chance-constrained energy model from the paper.
+    实现论文中的机会约束能耗模型。
     """
     
     def __init__(
@@ -73,7 +73,7 @@ class EnergyModel:
         self.alpha = alpha
         self.alpha_quantile = stats.norm.ppf(alpha)  # Φ^{-1}(α)
         
-        # Precompute constant factor: sqrt(g^3 / (2ρζn))
+        # 预计算常数因子: sqrt(g^3 / (2ρζn))
         self.power_factor = np.sqrt(
             (gravity ** 3) / (2 * air_density * rotor_disc_area * num_rotors)
         )
@@ -85,33 +85,33 @@ class EnergyModel:
         speed: Optional[float] = None
     ) -> Tuple[float, float]:
         """
-        Compute energy consumption for a single edge
+        计算单条边上的能耗
         
         Args:
-            distance: Distance between nodes (meters)
-            payload: Current payload weight (kg)
-            speed: Flight speed (m/s), if None uses mean speed
+            distance: 节点间距离（米）
+            payload: 当前载荷重量（kg）
+            speed: 飞行速度（m/s），为None时使用平均速度
             
         Returns:
-            Tuple of (expected_energy, energy_variance)
+            (expected_energy, energy_variance) 二元组
         """
         if speed is None:
             speed = self.speed_mean
         
-        # Total weight = drone weight + payload
+        # 总重量 = 无人机自重 + 载荷
         total_weight = self.drone_weight + payload
         
-        # Power consumption: (ν + q)^{3/2} * power_factor
+        # 功率消耗: (ν + q)^{3/2} * power_factor
         power = (total_weight ** 1.5) * self.power_factor
         
-        # Energy = Power * Time = Power * (Distance / Speed)
+        # 能量 = 功率 * 时间 = 功率 * (距离 / 速度)
         # E[e] = d * power * E[1/ξ]
-        # For random speed ξ ~ N(μ, σ²), we approximate E[1/ξ] ≈ 1/μ
-        # and Var(1/ξ) ≈ σ²/μ⁴
+        # 对随机速度 ξ ~ N(μ, σ²)，近似 E[1/ξ] ≈ 1/μ
+        # 且 Var(1/ξ) ≈ σ²/μ⁴
         
         expected_energy = distance * power / self.speed_mean
         
-        # Variance approximation using delta method
+        # 使用Delta方法近似方差
         # Var(e) ≈ (d * power)² * Var(1/ξ) ≈ (d * power)² * σ²/μ⁴
         energy_variance = ((distance * power) ** 2) * (self.speed_std ** 2) / (self.speed_mean ** 4)
         
@@ -123,15 +123,15 @@ class EnergyModel:
         payloads: List[float]
     ) -> EnergyResult:
         """
-        Compute total energy consumption for a trip
+        计算一个行程的总能耗
         
         Args:
-            route: List of locations [depot, customer1, customer2, ..., depot]
-            payloads: Payload weight at each leg of the journey
-                     payloads[i] is the weight when traveling from route[i] to route[i+1]
+            route: 位置列表 [仓库, 客户1, 客户2, ..., 仓库]
+            payloads: 每一段上的载荷重量
+                     payloads[i] 表示从 route[i] 到 route[i+1] 时的重量
                      
         Returns:
-            EnergyResult with expected energy, std, and feasibility
+            包含期望能耗、标准差和可行性的 EnergyResult
         """
         if len(route) < 2:
             return EnergyResult(0.0, 0.0, True, self.e_max - self.e_min)
@@ -145,12 +145,12 @@ class EnergyModel:
             
             exp_e, var_e = self.compute_edge_energy(distance, payload)
             total_expected += exp_e
-            # Assuming independence, variances add
+            # 假设各段独立，方差可相加
             total_variance += var_e
         
         total_std = np.sqrt(total_variance)
         
-        # Check chance constraint:
+        # 检查机会约束：
         # E[CE] + Φ^{-1}(α) * SDV(CE) ≤ E_max - E_min
         constraint_value = total_expected + self.alpha_quantile * total_std
         available_energy = self.e_max - self.e_min
@@ -171,12 +171,12 @@ class EnergyModel:
         order_weights: Optional[List[float]] = None
     ) -> EnergyResult:
         """
-        Compute trip energy from a list of orders
+        根据订单列表计算行程能耗
         
         Args:
-            depot_location: Location of depot
-            orders: List of orders in visit sequence
-            order_weights: Optional list of order weights (uses order.weight if None)
+            depot_location: 仓库位置
+            orders: 按访问顺序排列的订单列表
+            order_weights: 可选的订单重量列表（为None时使用order.weight）
             
         Returns:
             EnergyResult
@@ -184,21 +184,21 @@ class EnergyModel:
         if not orders:
             return EnergyResult(0.0, 0.0, True, self.e_max - self.e_min)
         
-        # Build route
+        # 构建路线
         route = [depot_location]
         for order in orders:
             route.append(order.location)
         route.append(depot_location)
         
-        # Build payloads (decreasing as we deliver)
+        # 构建每段载重（随投递逐渐减小）
         if order_weights is None:
             order_weights = [o.weight for o in orders]
         
-        # Payload at each leg
-        # Leg 0: depot -> customer 1, carrying all packages
-        # Leg 1: customer 1 -> customer 2, carrying all except first
+        # 每一段的载重：
+        # 第0段: 仓库 -> 第1个客户，携带所有包裹
+        # 第1段: 客户1 -> 客户2，携带除第1个外的所有包裹
         # ...
-        # Last leg: last customer -> depot, carrying nothing
+        # 最后一段: 最后一个客户 -> 仓库，不再携带包裹
         payloads = []
         remaining_weight = sum(order_weights)
         for i, weight in enumerate(order_weights):
@@ -216,16 +216,16 @@ class EnergyModel:
         insert_position: int
     ) -> Tuple[bool, EnergyResult]:
         """
-        Check if inserting a new order at given position is energy-feasible
+        检查在给定位置插入新订单是否满足能耗可行性
         
         Args:
-            depot_location: Depot location
-            current_orders: Current orders in trip
-            new_order: Order to insert
-            insert_position: Position to insert (0 = first customer)
+            depot_location: 仓库位置
+            current_orders: 当前行程中的订单
+            new_order: 待插入的订单
+            insert_position: 插入位置（0 = 第一个客户）
             
         Returns:
-            Tuple of (is_feasible, energy_result)
+            (is_feasible, energy_result) 二元组
         """
         # Create new order list with insertion
         new_orders = current_orders[:insert_position] + [new_order] + current_orders[insert_position:]
@@ -240,47 +240,46 @@ class EnergyModel:
         payload: float
     ) -> float:
         """
-        Calculate maximum additional distance that can be traveled
-        while satisfying chance constraint
+        计算在满足机会约束的前提下还能飞行的最大附加距离
         
         Args:
-            current_energy_used: Expected energy already consumed
-            current_energy_std: Current energy standard deviation
-            payload: Current payload weight
+            current_energy_used: 已消耗的期望能量
+            current_energy_std: 当前能量标准差
+            payload: 当前载荷重量
             
         Returns:
-            Maximum additional distance (meters)
+            最大可追加距离（米）
         """
         available = self.e_max - self.e_min
         
-        # We need: (current + new_exp) + α_q * sqrt(current_var + new_var) ≤ available
-        # This is complex to solve exactly, so we use a conservative estimate
+        # 需要满足: (current + new_exp) + α_q * sqrt(current_var + new_var) ≤ available
+        # 精确求解较复杂，这里使用保守估计
         
-        # Conservative: assume new_std adds linearly (overestimate)
+        # 保守估计：假设新的标准差线性相加（高估波动）
         remaining_budget = available - current_energy_used - self.alpha_quantile * current_energy_std
         
         if remaining_budget <= 0:
             return 0.0
         
-        # Energy per meter at current payload
+        # 当前载重下的单位距离能量消耗
         total_weight = self.drone_weight + payload
         power = (total_weight ** 1.5) * self.power_factor
         energy_per_meter = power / self.speed_mean
         
-        # Add safety factor for variance
+        # 为方差加入安全系数
         safety_factor = 0.8
         
         return remaining_budget * safety_factor / energy_per_meter
 
 
-# Utility functions for distance calculations
+# 距离计算的工具函数
 def euclidean_distance(loc1: np.ndarray, loc2: np.ndarray) -> float:
-    """Calculate Euclidean distance between two locations"""
+    """计算两点之间的欧氏距离"""
     return np.linalg.norm(loc1 - loc2)
 
 
 def compute_route_distance(route: List[np.ndarray]) -> float:
-    """Compute total distance of a route"""
+    """计算一条路径的总距离"""
     if len(route) < 2:
         return 0.0
     total = 0.0

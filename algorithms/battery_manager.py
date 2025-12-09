@@ -1,11 +1,11 @@
 """
-Battery Management Module
-Implements balanced aging policy and battery reservation strategy
+电池管理模块
+实现电池均衡老化策略和电池预留策略
 
-Key features:
-- Prioritize batteries with fewer cycles (balanced aging)
-- Reserve 10% of batteries for emergencies
-- Track charging status and availability
+主要特性：
+- 优先使用循环次数较少的电池（均衡老化）
+- 预留10%的电池用于紧急情况
+- 跟踪电池充电状态和可用性
 """
 
 from typing import List, Optional, Tuple
@@ -25,10 +25,10 @@ from config import (
 
 @dataclass
 class BatteryEvent:
-    """Event for battery state change"""
+    """电池状态变化事件"""
     time: float
     battery_id: int
-    event_type: str  # "available", "depleted"
+    event_type: str  # "available" 表示可用, "depleted" 表示耗尽
     
     def __lt__(self, other):
         return self.time < other.time
@@ -36,12 +36,12 @@ class BatteryEvent:
 
 class BatteryManager:
     """
-    Manages battery allocation, charging, and swapping
+    管理电池分配、充电和更换
     
-    Implements:
-    - Balanced aging: prioritize least-used batteries
-    - Reserve policy: keep 10% for emergencies
-    - Charging queue management
+    实现内容：
+    - 均衡老化：优先使用循环次数最少的电池
+    - 预留策略：预留10%电池用于紧急情况
+    - 充电队列管理
     """
     
     def __init__(
@@ -62,43 +62,43 @@ class BatteryManager:
         self.reserve_ratio = reserve_ratio
         self.urgent_threshold = urgent_threshold
         
-        # Priority queue for available batteries (by cycle count)
-        # Format: (cycle_count, battery_id, battery)
+        # 可用电池的优先队列（按循环次数排序）
+        # 格式: (cycle_count, battery_id, battery)
         self._available_heap: List[Tuple[int, int, Battery]] = []
         
-        # Initialize heap with available batteries
+        # 使用当前可用电池初始化堆
         for battery in depot.available_batteries:
             heappush(self._available_heap, (battery.cycle_count, battery.id, battery))
         
-        # Track reserved batteries
+        # 记录预留电池
         self._reserved_batteries: List[Battery] = []
         self._update_reserves()
     
     def _update_reserves(self):
-        """Update reserved battery pool based on reserve ratio"""
+        """根据预留比例更新预留电池池"""
         total_batteries = len(self.depot.available_batteries) + len(self.depot.charging_batteries)
         reserve_count = max(1, int(total_batteries * self.reserve_ratio))
         
-        # Move batteries to/from reserve as needed
+        # 根据需要在预留池和可用池之间移动电池
         current_reserve = len(self._reserved_batteries)
         
         if current_reserve < reserve_count and self._available_heap:
-            # Need more reserves - take from available (highest cycle count)
-            # Rebuild heap to get highest cycle count
+            # 需要更多预留电池——从可用池中取出（循环次数最高的）
+            # 重新构建堆以获得循环次数最高的电池
             all_available = []
             while self._available_heap:
                 item = heappop(self._available_heap)
                 all_available.append(item)
             
-            # Sort by cycle count descending
+            # 按循环次数降序排序
             all_available.sort(key=lambda x: x[0], reverse=True)
             
-            # Move some to reserve
+            # 将一部分移动到预留池
             while len(self._reserved_batteries) < reserve_count and all_available:
                 _, _, battery = all_available.pop(0)
                 self._reserved_batteries.append(battery)
             
-            # Put rest back in heap
+            # 剩余的重新放回堆中
             for item in all_available:
                 heappush(self._available_heap, item)
     
@@ -107,24 +107,24 @@ class BatteryManager:
         urgent_ratio: float = 0.0
     ) -> Optional[Battery]:
         """
-        Get the best available battery for a drone
+        获取一块适合无人机使用的最佳电池
         
-        Uses balanced aging: returns battery with fewest cycles.
-        If urgent_ratio > urgent_threshold, may use reserve batteries.
+        使用均衡老化策略：返回循环次数最少的电池。
+        当 urgent_ratio > urgent_threshold 时，可以动用预留电池。
         
         Args:
-            urgent_ratio: Ratio of urgent customers (0 to 1)
+            urgent_ratio: 紧急客户比例（0 到 1）
             
         Returns:
-            Battery if available, None otherwise
+            如果有电池则返回 Battery，否则返回 None
         """
-        # First try regular available batteries
+        # 优先尝试普通可用电池
         if self._available_heap:
             _, _, battery = heappop(self._available_heap)
             battery.status = BatteryStatus.IN_USE
             return battery
         
-        # If urgent enough, use reserve batteries
+        # 如果足够紧急，使用预留电池
         if urgent_ratio >= self.urgent_threshold and self._reserved_batteries:
             battery = self._reserved_batteries.pop(0)
             battery.status = BatteryStatus.IN_USE
@@ -139,12 +139,12 @@ class BatteryManager:
         remaining_charge: float
     ):
         """
-        Return a used battery to depot for charging
+        将使用后的电池返回仓库进行充电
         
         Args:
-            battery: Battery being returned
-            current_time: Current simulation time
-            remaining_charge: Remaining charge level
+            battery: 归还的电池
+            current_time: 当前仿真时间
+            remaining_charge: 剩余电量
         """
         battery.current_charge = remaining_charge
         battery.status = BatteryStatus.CHARGING
@@ -154,9 +154,7 @@ class BatteryManager:
         self.depot.charging_batteries.append(battery)
     
     def update_charging(self, current_time: float):
-        """
-        Update all charging batteries and move completed ones to available
-        """
+        """更新所有充电电池，并将充满的电池移动到可用池"""
         still_charging = []
         
         for battery in self.depot.charging_batteries:
@@ -187,15 +185,15 @@ class BatteryManager:
         
         self.depot.charging_batteries = still_charging
         
-        # Update reserves
+        # 更新预留池
         self._update_reserves()
     
     def get_time_to_next_available(self, current_time: float) -> float:
         """
-        Get time until next battery becomes available
+        获取下一块电池变为可用状态所需的时间
         
         Returns:
-            Time in minutes, or float('inf') if no batteries charging
+            时间（分钟）；如果没有电池在充电，则返回 float('inf')
         """
         if self._available_heap:
             return 0.0
@@ -218,10 +216,10 @@ class BatteryManager:
     
     def get_battery_status(self) -> dict:
         """
-        Get summary of battery status
+        获取电池状态摘要
         
         Returns:
-            Dict with counts of available, charging, in_use, reserved
+            字典，包含 available/charging/reserved 等数量信息
         """
         return {
             "available": len(self._available_heap),
@@ -241,31 +239,31 @@ class BatteryManager:
         urgent_ratio: float = 0.0
     ) -> Tuple[bool, float]:
         """
-        Swap drone's battery with a fresh one
+        为无人机更换电池
         
         Args:
-            drone: Drone needing battery swap
-            current_time: Current simulation time
-            urgent_ratio: Ratio of urgent customers
+            drone: 需要更换电池的无人机
+            current_time: 当前仿真时间
+            urgent_ratio: 紧急客户比例
             
         Returns:
-            Tuple of (success, time_when_ready)
+            (success, time_when_ready) 二元组
         """
-        # Return old battery
+        # 先归还旧电池
         if drone.battery is not None:
             remaining = drone.battery.current_charge
             self.return_battery(drone.battery, current_time, remaining)
         
-        # Get new battery
+        # 获取新电池
         new_battery = self.get_available_battery(urgent_ratio)
         
         if new_battery is None:
-            # No battery available, need to wait
+            # 没有可用电池，需要等待
             wait_time = self.get_time_to_next_available(current_time)
             drone.battery = None
             return False, current_time + wait_time + self.swap_time
         
-        # Swap successful
+        # 更换成功
         drone.battery = new_battery
         ready_time = current_time + self.swap_time
         
@@ -278,17 +276,17 @@ class BatteryManager:
         alpha_quantile: float = 1.2816
     ) -> float:
         """
-        Estimate required battery charge for a trip
+        估计执行一个行程所需的电量
         
-        Uses chance constraint: E[energy] + Φ^{-1}(α) * std
+        使用机会约束：E[energy] + Φ^{-1}(α) * std
         
         Args:
-            expected_energy: Expected energy consumption
-            energy_std: Standard deviation of energy
-            alpha_quantile: Quantile for safety probability
+            expected_energy: 预期能耗
+            energy_std: 能耗标准差
+            alpha_quantile: 安全概率对应的分位数
             
         Returns:
-            Required battery charge level
+            所需的电量水平
         """
         required = expected_energy + alpha_quantile * energy_std + self.e_min
         return min(required, self.e_max)
@@ -300,15 +298,15 @@ class BatteryManager:
         energy_std: float
     ) -> bool:
         """
-        Check if battery has enough charge to complete a trip
+        检查电池电量是否足以完成一个行程
         
         Args:
-            battery: Battery to check
-            expected_energy: Expected trip energy consumption
-            energy_std: Standard deviation of energy
+            battery: 待检查的电池
+            expected_energy: 该行程的预期能耗
+            energy_std: 能耗标准差
             
         Returns:
-            True if battery can complete trip with safety margin
+            如果在安全裕度下可以完成行程则返回 True
         """
         required = self.estimate_energy_for_trip(expected_energy, energy_std)
         return battery.current_charge >= required

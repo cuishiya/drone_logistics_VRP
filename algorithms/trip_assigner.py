@@ -25,11 +25,13 @@ from config import (
 class TripAssigner:
     """
     Assigns trips to drones minimizing total lateness
+    支持多仓库场景：无人机只能分配到同一仓库的trip
     
     Considers:
     - Drone availability times (when they return from current trip)
     - Battery swap times
     - Trip execution order (permutations)
+    - 多仓库：无人机与trip的仓库匹配
     """
     
     def __init__(
@@ -440,13 +442,15 @@ class TripAssigner:
     ) -> Dict[int, float]:
         """
         Calculate lateness for each order in a trip
+        多仓库场景：使用trip关联的仓库位置
         
         Returns:
             Dict mapping order_id to lateness (0 if on time)
         """
         lateness = {}
         current_time = start_time
-        current_loc = np.array([0.0, 0.0])  # Depot
+        # 多仓库：使用trip的仓库位置
+        current_loc = trip.depot_location if trip.depot_location is not None else np.array([0.0, 0.0])
         
         for order in trip.orders:
             # Travel time to this order
